@@ -1,0 +1,226 @@
+---
+title: "Elastic Net Regression"
+author: "D. Nick Weber"
+date: "2023-10-10"
+output: html_document
+---
+
+Filter CpG sites using Pearson's correlations.
+
+```{r}
+#Load the matrix of percent methylation values (post all filtering steps); e.g. 'BBRF_percent_wide_FC.csv'
+
+#Calculate Pearson's correlations
+
+corr_matrix <- corr.test(x = as.matrix(BBRF_percent_wide[,-10140]), y = BBRF_percent_wide[,10140], use="pairwise", method="pearson", adjust="BH", alpha=0.05)
+
+#Format dataframe
+
+corr_results <- data.frame(corr_matrix$r, corr_matrix$p.adj)
+corr_results <- tibble::rownames_to_column(corr_results, "Loc")
+colnames(corr_results) <- c("Loc", "r", "padj")
+corr_results$absr <- abs(corr_results$r)
+
+#Extract CpG sites with top 10% of Pearson's correlations
+
+quantile(corr_results$absr, 0.90)
+
+loc_highr <- corr_results %>%
+  filter(absr > 0.4465467)
+
+BBRF_percent_wide_filt <- BBRF_percent_wide %>%
+  select(loc_highr$Loc, Age)
+
+#Run cv.glmnet
+
+CVGLM <- cv.glmnet(x = as.matrix(BBRF_percent_wide_filt[,-1015]),
+                   y = BBRF_percent_wide_filt[,1015],
+                   nfolds = nrow(BBRF_percent_wide_filt),
+                   alpha = 0,
+                   type.measure = "mae",
+                   family = "gaussian",
+                   grouped=FALSE)
+
+min(CVGLM$cvm)
+```
+
+Filter CpG sites using glmnet weight coefficients.
+
+```{r}
+#Get CpG site model coefficients
+coefList <- coef(CVGLM, s=CVGLM$lambda.min)
+coefList <- data.frame(coefList@Dimnames[[1]][coefList@i+1],coefList@x)
+names(coefList) <- c('var','val')
+coefList <- coefList[-1, ]
+colnames(coefList) <- c("Loc", "Weight")
+coefList$AbsWeight <- abs(coefList$Weight)
+
+#Remove CpG sites in bottom 10% of contributions
+
+quantile(coefList$AbsWeight, 0.10)
+
+loc_highweights <- coefList %>%
+  filter(AbsWeight > 0.02201199)
+
+BBRF_percent_wide_filt <- BBRF_percent_wide %>%
+  select(loc_highweights$Loc, Age)
+
+#Re-run cv.glmnet
+
+CVGLM <- cv.glmnet(x = as.matrix(BBRF_percent_wide_filt[,-913]),
+                   y = BBRF_percent_wide_filt[,913],
+                   nfolds = nrow(BBRF_percent_wide_filt),
+                   alpha = 0,
+                   type.measure = "mae",
+                   family = "gaussian",
+                   grouped=FALSE)
+
+min(CVGLM$cvm)
+
+#Repeat filtering on weight coefficients until MAE no longer decreases
+```
+
+Identify optimal alpha value.
+
+```{r}
+x <- as.matrix(BBRF_percent_wide_filt[,-317])
+y <- BBRF_percent_wide_filt[,317]
+
+BBRF_glmnet <- list()
+nreps <- 10
+BBRF_glmnet <- lapply(1:nreps, function(i){
+fit <- cva.glmnet(x = x, y = y, nfolds=nrow(BBRF_percent_wide_filt), type.measure="mae", family="gaussian", grouped=FALSE)
+    BBRF_glmnet$model <- fit$modlist
+})
+
+#Rename lists
+prefix <- "model"
+suffix <- seq(1:10)
+prefix2 <- "alpha"
+suffix2 <- c(0.000, 0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.512, 0.729, 1.000)
+
+for (i in 1:length(BBRF_glmnet)) {
+  names(BBRF_glmnet) <- paste(prefix, suffix, sep="_")
+    for (j in 1:11) {
+  names(BBRF_glmnet[[i]]) <- paste(prefix2, suffix2, sep="_") 
+    }
+}
+
+#Pull parameters of interest
+vec <- data.frame(matrix(ncol=2))
+names(vec) <- c("min.lambda", "min.mae")
+
+for (i in 1:length(BBRF_glmnet)) {
+  for (j in 1:length(BBRF_glmnet[[i]])) {
+    vec <- rbind(vec, c(BBRF_glmnet[[i]][[j]]$lambda.min, min(BBRF_glmnet[[i]][[j]]$cvm)))
+    }
+  }
+
+vec <- vec[-1, ]
+alpha <- c(0.000, 0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.512, 0.729, 1.000)
+vec$alpha <- rep(alpha, 10)
+
+#Calculate means for each alpha value
+min.mae.means <- aggregate(vec$min.mae ~ as.factor(vec$alpha), FUN=mean)
+min.lambda.means <- aggregate(vec$min.lambda ~ as.factor(vec$alpha), FUN=mean)
+vec.means <- cbind(min.mae.means, min.lambda.means)
+vec.means <- vec.means[ ,-3]
+colnames(vec.means) <- c("alpha", "mean.min.mae", "mean.min.lambda")
+
+#Extract best parameter values
+best.params <- vec.means[which.min(vec.means$mean.min.mae), ]
+best.params
+
+#Plot of alpha versus min.mae for each model iteration
+ggplot(vec, aes(x=as.factor(alpha), y=min.mae)) +
+  geom_point() +
+  labs(x="alpha", y="min. mae")
+```
+
+Run final models.
+
+```{r}
+#Load the relevant training and testing datasets, saved as R objects; e.g. 'train_FC' and 'test_FC'
+
+load("train")
+load("test")
+
+CVGLM <- cv.glmnet(x = as.matrix(train[,-317]),
+                   y = train_temp[,317],
+                   nfolds = nrow(train),
+                   alpha = 0,
+                   type.measure = "mae",
+                   family = "gaussian",
+                   grouped = FALSE)
+
+min(CVGLM$cvm)
+
+#Loop over individuals to get predicted age estimates from 'CVGLM'
+
+z <- lapply(1:nrow(train), function(x){
+  fit <- glmnet(as.matrix(train[-x,-317]),
+                train_temp[-x,317],
+                alpha = 0,
+                lambda = CVGLM$lambda.min,
+                family="gaussian")
+
+   pred <- predict(fit, as.matrix(train[x,-317]), type = "response")
+
+  return(data.frame(pred, true = train[x,317]))
+})
+
+z <- do.call(rbind, z)
+colnames(z) <- c("PredictedAge", "ChronologicalAge")
+
+#Linear regression on testing dataset
+
+regression_FCs <- lm(z$ChronologicalAge ~ z$PredictedAge)
+summary(regression_FCs)
+
+#MAE on testing dataset
+
+mae(z$ChronologicalAge, z$PredictedAge)
+
+#Calculate residuals on testing dataset
+
+z$Residuals <- z$PredictedAge - z$ChronologicalAge
+
+#Calculate relative error on testing dataset
+
+z$RelativeError <- abs(z$Residuals) / z$ChronologicalAge
+
+regression_error <- lm(z$RelativeError ~ z$ChronologicalAge)
+summary(regression_error)
+
+#Predict
+
+pred <- predict(CVGLM, newx = as.matrix(test[,-317]), s="lambda.min")
+
+pred <- data.frame(pred)
+colnames(pred) <- c("PredictedAge")
+pred$ChronologicalAge <- test$Age
+
+#Linear regression on test dataset
+
+regression <- lm(pred$ChronologicalAge ~ pred$PredictedAge)
+summary(regression)
+
+#MAE of test dataset
+
+mae(pred$ChronologicalAge, pred$PredictedAge)
+
+#Calculate residuals on test dataset
+
+pred$Residuals <- pred$PredictedAge - pred$ChronologicalAge
+
+#Calculate relative error on test dataset
+
+pred$RelativeError <- abs(pred$Residuals) / pred$ChronologicalAge
+
+regression_error <- lm(pred$RelativeError ~ pred$ChronologicalAge)
+summary(regression_error)
+
+#Test for difference in residuals between training and testing datasets
+
+var.test(z$Residuals, pred$Residuals)
+```
