@@ -1,6 +1,6 @@
-# Weber et al. 2023 (submitted to CJFAS)
+# Weber et al. 2024
 
-Data and scripts/code associated with "Epigenetic age estimation in a long-lived, deepwater scorpionfish: insights into epigenetic clock development" D. Nick Weber, Andrew T. Fields, Derek W. Chamberlin, William F. Patterson III, and David S. Portnoy. Submitted to CJFAS.
+Data and scripts/code associated with "Epigenetic age estimation in a long-lived, deepwater scorpionfish: insights into epigenetic clock development" D. Nick Weber, Andrew T. Fields, Derek W. Chamberlin, William F. Patterson III, and David S. Portnoy. 2024. CJFAS.
 
 ## Associated data can be found in the "Data" folder, including:
 - "BBRF_percent_wide_FC.csv" contains the matrix of percent methylation values (post all filtering steps) for the fin clip samples, necessary to recreate the elastic net regression results.
